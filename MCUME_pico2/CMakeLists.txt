@@ -6,8 +6,8 @@ include(pico_sdk_import.cmake)
 # We also need PICO EXTRAS
 #include(pico_extras_import.cmake)
 
-#set(TARGET testkeymax)
-set(TARGET testpsram)
+set(TARGET testkeymax)
+#set(TARGET testpsram)
 #set(TARGET pico20)
 #set(TARGET pico64)
 #set(TARGET pico81)

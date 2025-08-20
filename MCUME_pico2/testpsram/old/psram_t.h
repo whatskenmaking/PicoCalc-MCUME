@@ -31,9 +31,6 @@ class PSRAM_T
   public:
     PSRAM_T(uint8_t _CS, uint8_t _MOSI=11, uint8_t _SCLK=13, uint8_t _MISO=12);
     void begin(void);
-    void reset(void);
-    void spi_mode(void);
-    void qspi_mode(void);
     void pswrite(uint32_t addr, uint8_t val);
     uint8_t psread(uint32_t addr);
     uint16_t psread_w(uint32_t addr);

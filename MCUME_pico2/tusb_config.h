@@ -72,6 +72,7 @@
 // change to 1 if using pico-pio-usb as host controller for raspberry rp2040
 #ifdef HAS_USBPIO
 #define CFG_TUH_RPI_PIO_USB   1
+#define PICO_DEFAULT_PIO_USB_DP_PIN   2 	
 #else
 #define CFG_TUH_RPI_PIO_USB   0
 #endif

@@ -12,8 +12,6 @@ extern "C" {
 #define RED        RGBVAL16(255, 0, 0)
 #define LIGHT_BLUE RGBVAL16(0, 136, 255)
 
-//#define EIGHTBIT_TEST 1
-
 PICO_DSP tft;
 static int fb_width, fb_height;
 
@@ -46,13 +44,7 @@ bool repeating_timer_callback(struct repeating_timer *t) {
 
 int main(void) {
 //    vreg_set_voltage(VREG_VOLTAGE_1_05);
-//    vreg_set_voltage(VREG_VOLTAGE_3_00);
-
-
-
-//    set_sys_clock_khz(25000, true);    
-//    set_sys_clock_khz(133000, true);    
-
+//    set_sys_clock_khz(125000, true);    
 //    set_sys_clock_khz(150000, true);    
 //    set_sys_clock_khz(133000, true);    
 //    set_sys_clock_khz(200000, true);    
@@ -61,11 +53,10 @@ int main(void) {
 //    set_sys_clock_khz(225000, true);    
 //    set_sys_clock_khz(250000, true);  
 
-//    set_sys_clock_khz(133000, true);    
 
     // Overclock!
 //    set_sys_clock_khz(280000, true);
-    set_sys_clock_khz(260000, true); // for PSRAM tolerance 230000-270000
+    set_sys_clock_khz(260000, true); // for PSRAM tolerance 
     *((uint32_t *)(0x40010000+0x58)) = 2 << 16; //CLK_HSTX_DIV = 2 << 16; // HSTX clock/2
 
     emu_init();
@@ -88,7 +79,6 @@ int main(void) {
 
 #ifdef HAS_PSRAM
     psram.begin();
-    psram.qspi_mode();
 #endif
 
     struct repeating_timer timer;
@@ -113,60 +103,24 @@ int main(void) {
 	tft.drawText(8,8,buf,BLUE,LIGHT_BLUE,false);
 
 #ifdef HAS_PSRAM
-    uint32_t addr = 0; //0xFFFF3F;
-#ifdef EIGHTBIT_TEST
-    uint8_t val = 0; //0x3F;
-#else
-    uint16_t val = 0; //0x3F;
-#endif   
-    char valpt[5];
+    uint32_t addr = 0xFFFFFF;
+    uint8_t val = 0x33;
+    char valpt[3] = {0,0,0};
 #endif
     while (true) {
 #ifdef HAS_PSRAM
-#ifdef EIGHTBIT_TEST
-        valpt[0]=digits[(val>>4)&0xf];
+        valpt[0]=digits[val>>4];
         valpt[1]=digits[val&0xf];
-        valpt[2]=0;
-        //psram.qspi_mode();
         psram.pswrite(addr,val);
-        //psram.spi_mode();
-        uint8_t rval = psram.psread(addr);
-#else
-        valpt[0]=digits[(val>>12)&0xf];
-        valpt[1]=digits[(val>>8)&0xf];
-        valpt[2]=digits[(val>>4)&0xf];
-        valpt[3]=digits[val&0xf];
-        valpt[4]=0;
-        //psram.qspi_mode();
-        psram.pswrite_w(addr,val);
-        //psram.spi_mode();
-        uint16_t rval = psram.psread_w(addr);
-#endif  
-        if ( rval == val ) {
-          tft.drawText((addr&0xF)*16,(3+((addr>>4)&0xF))*8,valpt,BLUE,LIGHT_BLUE,false);  
-        }
-        else {
-          tft.fillScreen(RED);
-          tft.drawRect((fb_width-320)/2,(fb_height-200)/2, 320,200, BLUE);
-#ifdef EIGHTBIT_TEST
-          valpt[0]=digits[(rval>>4)&0xF];
-          valpt[1]=digits[rval&0xf];
-#else
-          valpt[0]=digits[(rval>>12)&0xf];
-          valpt[1]=digits[(rval>>8)&0xf];
-          valpt[2]=digits[(rval>>4)&0xf];
-          valpt[3]=digits[rval&0xf];
-#endif          
-          tft.drawText((addr&0xF)*16,(3+((addr>>4)&0xF))*8,valpt,RED,LIGHT_BLUE,false);  
-          //while (true) {}
-        } 
-        
-#ifdef EIGHTBIT_TEST
-        addr = (addr+1) & 0xFFFFFF;
-#else
-        addr = (addr+2) & 0xFFFFFF;
-#endif   
-        val = val+1;
+        //psram.psread(addr);
+        //if (psram.psread(addr) == val ) {
+        //  tft.drawText((addr&0xF)*16,(3+(addr>>4))*8,valpt,BLUE,LIGHT_BLUE,false);  
+        //}
+        //else {
+        //  tft.drawText((addr&0xF)*16,(3+(addr>>4))*8,valpt,RED,LIGHT_BLUE,false);  
+        //} 
+        //addr = (addr+1) & 0xFF;
+        //val = val+1;
         //if ((addr& 0xFF)==0) val++;    
 #endif
         uint16_t bClick = emu_GetPad();
@@ -234,7 +188,7 @@ int main(void) {
             }
         }
         prevhk = hk;
-        //sleep_ms(2);
+        sleep_ms(20);
     }
 }
 
