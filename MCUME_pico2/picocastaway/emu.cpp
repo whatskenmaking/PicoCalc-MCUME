@@ -15,19 +15,19 @@
 
 #include "tossw12.h"
 
+#define CACHED 1
+
 #ifdef HAS_PSRAM
-#include "psram_t.h"
-PSRAM_T psram = PSRAM_T(PSRAM_CS, PSRAM_MOSI, PSRAM_SCLK, PSRAM_MISO);
+#ifdef CACHED
+#define WAIT_AFTER_WRITE 1
+#endif
+#include "psram_spi.h"
 #endif
 
 //#define PSRAM_DISK 1
 
 #ifdef ALL_IN_RAM
 uint8 *mem1base;
-#else
-#ifdef PSRAM_FAKE
-uint8 *mem1base;
-#endif
 #endif
 uint8 *mem2base;
 uint8 *rombase;
@@ -82,6 +82,23 @@ void Redraw16 ( int row, int vid_adr ) {
 
   register int col;
   register int bit;
+#ifdef HAS_PSRAM
+  // Assumed all memory is in PSRAM else use code below !!!!
+  unsigned char line_buf[160];
+  unsigned short *line_buf_pt=(unsigned short *)&line_buf[0];
+  for (int i=0; i<160; i+=4)
+    psram_readn(line_i+i,&line_buf[i],4);   
+  for (col=0; col<20; col++) {
+    register unsigned short pl0=*line_buf_pt++,pl1=*line_buf_pt++,pl2=*line_buf_pt++,pl3=*line_buf_pt++;
+    for (bit=15;bit>=0;bit--) {
+      int ind = (pl0 >> bit) & 0x1;
+      ind += ((pl1 >> bit) & 0x1)<<1;
+      ind += ((pl2 >> bit) & 0x1)<<2;
+      ind += ((pl3 >> bit) & 0x1)<<3;
+      *line_o++ = palmap [ ind ]; 
+    }
+  }
+#else
   for (col=0; col<20; col++) {
     register unsigned short pl0=ReadW(line_i),pl1=ReadW(line_i+2),pl2=ReadW(line_i+4),pl3=ReadW(line_i+6);
     line_i += 8;
@@ -93,6 +110,7 @@ void Redraw16 ( int row, int vid_adr ) {
       *line_o++ = palmap [ ind ]; 
     }
   }
+#endif
   emu_DrawLine16(&line[0], XRES, YRES, row);
 }
 
@@ -116,6 +134,22 @@ void Redraw16_med ( int row, int vid_adr ) {
 
   register int col;
   register int bit;
+#ifdef HAS_PSRAM
+  // Assumed all memory is in PSRAM else use code below !!!!
+  unsigned char line_buf[160];
+  unsigned short *line_buf_pt=(unsigned short *)&line_buf[0];
+  for (int i=0; i<160; i+=4)
+    psram_readn(line_i+i,&line_buf[i],4);
+  for (col=0; col<40; col++) {
+    register unsigned short pl0=*line_buf_pt++,pl1=*line_buf_pt++;
+    for (bit=15;bit>=0;bit--) {
+      int ind = (pl0 >> bit) & 0x1;
+      ind += ((pl1 >> bit) & 0x1)<<1;
+      if (bit & 0x01)
+        *line_o++ = palmap [ ind ]; 
+    }
+  }
+#else
   for (col=0; col<40; col++) {
     register unsigned short pl0=ReadW(line_i),pl1=ReadW(line_i+2);
     line_i += 4;
@@ -126,6 +160,7 @@ void Redraw16_med ( int row, int vid_adr ) {
         *line_o++ = palmap [ ind ]; 
     }
   }
+#endif 
   emu_DrawLine16(&line[0], XRES, YRES, row);
 }
 
@@ -136,7 +171,7 @@ static uint8 disk1[256];
 void ast_Init(void)
 {
 #ifdef HAS_PSRAM
-  psram.begin();
+  psram_init();
 #endif
 
   emu_printf("Allocating RAM");
@@ -149,24 +184,13 @@ void ast_Init(void)
   if ((MEMSIZE-RAM1SIZE)>0) {
     mem2base = (uint8*) malloc(MEMSIZE-RAM1SIZE);
     if (!mem2base) emu_printf("malloc mem2 failed\n"); 
-  }  
-#ifdef PSRAM_FAKE
-  if ((RAM1SIZE)>0) {
-    mem1base = (uint8*) malloc(RAM1SIZE);
-    if (!mem1base) emu_printf("malloc mem1 failed\n"); 
-  }
-  else {
-    mem1base = mem2base;
-  }
-#endif   
+  } 
 #endif
   rombase = (uint8*)&tos[0]-ROMBASE;
 
 #ifdef ALL_IN_RAM
-    memcpy (mem1base, &tos[0], 8);
+  memcpy (mem1base, &tos[0], 8);
 #else
-  //for (int i=0; i<MEMSIZE;i++)
-  //  WriteBB(i, 0); 
   for (int i=0; i<8;i++)
     WriteBB(i, tos[i]);
 #endif  
@@ -500,7 +524,7 @@ void ast_Step(void)
       cycleco+=waitstate;
       waitstate=0;
 #ifndef NO_SOUND
-      SoundCycles+=cycleco;
+//      SoundCycles+=cycleco;
 #endif            
       //MFP timer A delay mode
       if (mfp_ascale>1) {
@@ -719,53 +743,104 @@ void ast_Step(void)
 }
 
 
+
 #ifdef HAS_PSRAM
 
+static unsigned char address_cache[4];
+static int address_cached = -1;
+
 unsigned char ram_readb(int address) {
-#ifdef PSRAM_FAKE
-  return mem1base[address];
-#else   
-  return (psram.psread(address));
-#endif
+/*
+#ifdef CACHED
+  int address_clipped = address & 0xfffffffc;
+  if (address_clipped != address_cached) {
+    address_cached = address_clipped;
+    psram_readn(address_clipped,&address_cache[0],4);
+    return address_cache[address & 3];
+  }
+  else {
+    return address_cache[address & 3];
+  }   
+#endif  
+*/
+  return (psram_read8(address));
 }
 
-void  ram_writeb(int address, unsigned char val)  {
-#ifdef PSRAM_FAKE
-  mem1base[address] = val;
-#else   
-  psram.pswrite(address,val);
-#endif
+void  ram_writeb(int address, unsigned char val) {
+#ifdef CACHED  
+  int address_clipped = address & 0xfffffffc;
+  if (address_clipped == address_cached) {
+    address_cache[address & 3] = val;
+  }  
+#endif  
+  psram_write8(address,val);
 }
 
 unsigned short ram_readw(int address) {
-#ifdef PSRAM_FAKE
-  return mem1base[address]|(mem1base[address+1]<<8);
+#ifdef CACHED  
+  int address_clipped = address & 0xfffffffc;
+  if (address_clipped != address_cached) {
+    address_cached = address_clipped;
+    psram_readn(address_clipped,&address_cache[0],4);
+    return *((unsigned short*)&address_cache[address & 2]);  
+  }
+  else {
+    return *((unsigned short*)&address_cache[address & 2]);
+  } 
 #else   
-//  return psram.psread(address)|(psram.psread(address+1)<<8);
-  return psram.psread_w(address);
-#endif
-
+  return psram_read16(address);
+  //unsigned short val;
+  //psram_readn(address,(unsigned char*)&val,2);
+  //return val;
+#endif     
 }
 
-void  ram_writew(int address, unsigned short val)  {
-#ifdef PSRAM_FAKE
-  mem1base[address] = val;
-  mem1base[address+1] = val>>8;
-#else   
-  psram.pswrite_w(address,val);
-#endif
+void  ram_writew(int address, unsigned short val) { 
+#ifdef CACHED  
+  int address_clipped = address & 0xfffffffc;
+  if (address_clipped == address_cached) {
+    *((unsigned short*)(&address_cache[address & 2])) = val;
+  }  
+#endif  
+  psram_write16(address,val);
+  //psram_writen(address,(unsigned char*)&val,2);  
 }
+
+unsigned long ram_readl(int address) {
+#ifdef CACHED  
+  int address_clipped = address & 0xfffffffc;
+  if (address_clipped == address_cached) {
+    return (address_cache[1]<<24)+(address_cache[0]<<16)+(address_cache[3]<<8)+(address_cache[2]);
+  }
+  else {
+    address_cached = address_clipped;  
+    psram_readn(address,&address_cache[0],4);
+    return (address_cache[1]<<24)+(address_cache[0]<<16)+(address_cache[3]<<8)+(address_cache[2]);
+  }
+#else 
+  unsigned char tmp[4]; 
+  psram_readn(address,&tmp[0],4);
+  return (tmp[1]<<24)+(tmp[0]<<16)+(tmp[3]<<8)+(tmp[2]);
+  //return psram_read32(address);
+#endif  
+}
+
+void  ram_writel(int address, unsigned long val)  {  
+  //psram_writen(address,(unsigned char*)&val,4);
+  psram_write32(address,val);
+}
+
 
 #define PSRAM_DISK_OFFSET (2*1024*1024)
 
 // disk IO mapped to PSRAM
 
 static uint8 read_disk(int address) {
-  return (psram.psread(address+PSRAM_DISK_OFFSET)); 
+  return (psram_read8(address+PSRAM_DISK_OFFSET)); 
 }
 
 static void write_disk(int address, uint8 val)  {
-  psram.pswrite(address+PSRAM_DISK_OFFSET,val); 
+  psram_write8(address+PSRAM_DISK_OFFSET,val); 
 }
 #endif
 
@@ -876,12 +951,26 @@ void ast_Start(char * filename)
   emu_printf("init done");
 }
 
+#define AUDIO_SAMPLE_RATE 22050
+#define AUDIO_BUFFER_LENGTH (AUDIO_SAMPLE_RATE / 50 + 1)
+
+alignas(4) int audio_buffer[AUDIO_BUFFER_LENGTH];
+
 void SND_Process(void *stream, int len) {
 #ifndef NO_SOUND  
-  Sound_UpdateFromCallBack16((short *)stream, len);
+//  Sound_UpdateFromCallBack16((short *)stream, len);
+
+  short * buf = (short *) audio_buffer;
+  Sound_UpdateFromCallBack16(buf, len);
+  //psg_update(buf, AUDIO_BUFFER_LENGTH, 0xff);
+  audio_sample * snd_buf =  (audio_sample *)stream;
+  for (int h = 0; h < len*2; h += 2) {            
+      short s1 = buf[h]>>7; 
+      short s2 =  buf[h+1]>>7;
+      *snd_buf++ = ((s1+s2)/2)+128;
+  } 
 #endif
 } 
-
 
 
 

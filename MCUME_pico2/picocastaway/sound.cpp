@@ -508,21 +508,26 @@ void Sound_UpdateFromCallBack16(short *pBuffer, int len)
   Sound_GenerateChannel(pChannelB,psg[PSG_REG_CHANNEL_B_FINE],psg[PSG_REG_CHANNEL_B_COARSE],psg[PSG_REG_CHANNEL_B_AMP],psg[PSG_REG_MIXER_CONTROL],&ChannelFreq[1],1);
   Sound_GenerateChannel(pChannelC,psg[PSG_REG_CHANNEL_C_FINE],psg[PSG_REG_CHANNEL_C_COARSE],psg[PSG_REG_CHANNEL_C_AMP],psg[PSG_REG_MIXER_CONTROL],&ChannelFreq[2],2);
 
+  //unsigned char *out=(unsigned char *)pBuffer;
   /* Mix channels together, using table to clip and also convert to 'unsigned char' */
   for(i=0; i<len; i++) {
     //short s = ((*pChannelA++) +(*pChannelB++) + (*pChannelC++))<<4; 
     //*pBuffer++ = s; 
     //*pBuffer++ = s;
-    //char s = pMixTable[(*pChannelA++) + (*pChannelB++) + (*pChannelC++)];
+    
+    //char s1 = pMixTable[(*pChannelA++) + (*pChannelB++) + (*pChannelC++)];
+    //char s2 = pMixTable[(*pChannelA++) + (*pChannelB++) + (*pChannelC++)];
+    //*out++=(s1+s2)+128;
+
+    //short s1 = (*pChannelA++) + (*pChannelB++) + (*pChannelC++); 
+    //short s2 =  (*pChannelA++) + (*pChannelB++) + (*pChannelC++);
+    //*out++ = ((s1+s2)/2)+128;
+
     short s = (*pChannelA++) + (*pChannelB++) + (*pChannelC++);
     *pBuffer++ = (short)s << 7;
     s = (*pChannelA++) + (*pChannelB++) + (*pChannelC++);
-
-//    s = pMixTable[(*pChannelA++) + (*pChannelB++) + (*pChannelC++)];
     *pBuffer++ = (short)s << 7;
-    //*pBuffer++ = (short)s << 8;
-    //*pBuffer++ = 0;
-    //
+
   }
 
     bWriteEnvelopeFreq = FALSE;

@@ -6,8 +6,8 @@ include(pico_sdk_import.cmake)
 # We also need PICO EXTRAS
 #include(pico_extras_import.cmake)
 
-set(TARGET testkeymax)
-#set(TARGET testpsram)
+#set(TARGET testkeymax)
+set(TARGET testpsram)
 #set(TARGET pico20)
 #set(TARGET pico64)
 #set(TARGET pico81)
@@ -41,7 +41,8 @@ include_directories(display)
 include_directories(fatfs)
 include_directories(fatfs/source)
 include_directories(sd_driver)
-include_directories(psram)
+#include_directories(psram)
+include_directories(psramfast)
 include_directories(flash)
 include_directories(usb_kbd)
 include_directories(.)
@@ -431,7 +432,7 @@ set(FATSD_SOURCES
 
 
 set(PSRAM_SOURCES 
-		psram/psram_t.cpp
+#		psram/psram_t.cpp
 	)
 
 set(FLASH_SOURCES 
@@ -469,7 +470,8 @@ add_executable(${TARGET}
 		${USB_SOURCES}
 	)
 
-pico_generate_pio_header(${TARGET} ${CMAKE_CURRENT_LIST_DIR}/psram/psram_spi.pio)
+#pico_generate_pio_header(${TARGET} ${CMAKE_CURRENT_LIST_DIR}/psram/psram_spi.pio)
+pico_generate_pio_header(${TARGET} ${CMAKE_CURRENT_LIST_DIR}/psramfast/psram_spi.pio)
 
 target_link_libraries(${TARGET} pico_multicore
 	    pico_stdlib

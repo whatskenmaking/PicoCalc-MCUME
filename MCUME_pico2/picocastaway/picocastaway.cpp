@@ -45,8 +45,8 @@ int main(void) {
 //    set_sys_clock_khz(225000, truxe);
 
     // Overclock!
-//    set_sys_clock_khz(280000, true);
-    set_sys_clock_khz(260000, true); // for PSRAM tolerance 
+    set_sys_clock_khz(280000, true);
+//    set_sys_clock_khz(260000, true); // for PSRAM tolerance 
     *((uint32_t *)(0x40010000+0x58)) = 2 << 16; //CLK_HSTX_DIV = 2 << 16; // HSTX clock/2
 
     // Overclock!
