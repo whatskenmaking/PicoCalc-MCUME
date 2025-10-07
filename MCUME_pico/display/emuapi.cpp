@@ -5,13 +5,16 @@
 #include "pico.h"
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
-#include <stdio.h>
-#include <string.h>
+#include "hardware/gpio.h"
 
 extern "C" {
   #include "emuapi.h"
   #include "iopins.h"
+  #include "i2ckbd.h"
 }
+
+#include <stdio.h>
+#include <string.h>
 
 static bool emu_writeConfig(void);
 static bool emu_readConfig(void);
@@ -55,6 +58,7 @@ static int topFile=0;
 static char selection[MAX_FILENAME_PATH]="";
 static char selected_filename[MAX_FILENAME_SIZE]="";
 static char files[MAX_FILES][MAX_FILENAME_SIZE];
+
 static bool menuRedraw=true;
 
 #if (defined(PICOMPUTER) || defined(PICOZX) )
@@ -425,9 +429,9 @@ int emu_GetPad(void)
 
 int emu_ReadKeys(void) 
 {
-  uint16_t retval;
-  uint16_t j1 = readAnalogJoystick();
-  uint16_t j2 = 0;
+  uint16_t retval;                      // Return value
+  uint16_t j1 = readAnalogJoystick();   // Read the first joystick
+  uint16_t j2 = 0;                      // Second joystick initialized to nothing
   
   // Second joystick
 #if INVY
@@ -465,13 +469,15 @@ int emu_ReadKeys(void)
 #endif
 
 
-  if (joySwapped) {
-    retval = ((j1 << 8) | j2);
+  // Sets the return value according to the joystick swap status
+  if (joySwapped) {             // If joysticks are swapped, swap them in the return value
+    retval = ((j1 << 8) | j2);     // Joystick 1 on high byte, joystick 2 on low byte
   }
-  else {
-    retval = ((j2 << 8) | j1);
+  else {                        // If joysticks are not swapped, put them in the normal order
+    retval = ((j2 << 8) | j1);     // Joystick 2 on high byte, joystick 1 on low byte
   }
 
+  // Not exactly sure what this is, but it looks to be related to USB gamepad support?
   if (usbnavpad & MASK_JOY2_UP) retval |= MASK_JOY2_UP;
   if (usbnavpad & MASK_JOY2_DOWN) retval |= MASK_JOY2_DOWN;
   if (usbnavpad & MASK_JOY2_LEFT) retval |= MASK_JOY2_LEFT;
@@ -703,11 +709,44 @@ int emu_ReadKeys(void)
   {  
   }
 
+// If there's both an LCD screen and a VGA connection, turn on the on-screen keyboard, if enabled
 #if (defined(ILI9341) || defined(ST7789)) && defined(USE_VGA)
   if (oskbOn) {
     retval |= MASK_OSKB; 
   }  
 #endif  
+
+#ifdef PICOCALC
+  // Read the I2C keyboard as a joystick
+  int i2cKey = emu_ReadI2CKeyboard();
+  if (i2cKey > 0) {
+    // Map PicoCalc directional buttons to joystick directions for menu navigation
+    switch(i2cKey) {
+      case 0xB5: // Up button
+        retval |= MASK_JOY2_UP;
+        break;
+      case 0xB6: // Down button
+        retval |= MASK_JOY2_DOWN;
+        break;
+      case 0xB4: // Left button
+        retval |= MASK_JOY2_LEFT;
+        break;
+      case 0xB7: // Right button
+        retval |= MASK_JOY2_RIGHT;
+        break;
+      case 0x0A: // Return key
+      case 0x0D:
+        retval |= MASK_JOY2_BTN;
+        break;
+      case 0x08: // Backspace key
+        retval |= MASK_KEY_USER1; // Delete
+        break;
+      case 0x20: // Space key
+        retval |= MASK_KEY_USER2; // Swap Joysticks
+        break;
+    }
+  }
+#endif
   
   return (retval);
 }
@@ -723,7 +762,24 @@ unsigned short emu_DebounceLocalKeys(void)
 
 int emu_ReadI2CKeyboard(void) {
   int retval=0;
-#if (defined(PICOMPUTER) || defined(PICOZX) )
+#ifdef PICOCALC
+  // Use the official PicoCalc i2ckbd library
+  static bool i2c_initialized = false;
+  
+  // Initialize I2C keyboard on first use (lazy initialization to avoid SD card conflicts)
+  if (!i2c_initialized) {
+    init_i2c_kbd();
+    i2c_initialized = true;
+  }
+  
+  // Read keyboard using official PicoCalc function
+  int c = read_i2c_kbd();
+  if (c > 0) {
+    retval = c;
+  }
+  if (retval == 10) retval = 13; // Map LF to CR. PicoCalc returns LF for Enter key
+
+#elif (defined(PICOMPUTER) || defined(PICOZX) )
   if (key_alt) {
     keys = (const unsigned short *)key_map3;
   }
@@ -753,7 +809,10 @@ int emu_ReadI2CKeyboard(void) {
 
 unsigned char emu_ReadI2CKeyboard2(int row) {
   int retval=0;
-#if (defined(PICOMPUTER) || defined(PICOZX) )
+#ifdef PICOCALC
+  // For PICOCALC, return 0 since it uses real I2C, not matrix scanning
+  retval = 0;
+#elif (defined(PICOMPUTER) || defined(PICOZX) )
   retval = keymatrix[row];
 #endif
   return retval;
@@ -851,7 +910,9 @@ void emu_InitJoysticks(void) {
 #endif
 #endif
 
-#if (defined(PICOMPUTER) || defined(PICOZX) ) 
+#ifdef PICOCALC
+  // I2C keyboard initialization is now handled by the official i2ckbd library
+#elif (defined(PICOMPUTER) || defined(PICOZX) ) 
   // keyboard LED
 #ifdef KLED  
   gpio_init(KLED);

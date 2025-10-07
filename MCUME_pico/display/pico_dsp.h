@@ -29,6 +29,10 @@
 #define TFT_WIDTH      240 
 #define TFT_REALWIDTH  240
 #else
+#ifdef ILI9488
+#define TFT_WIDTH      320
+#define TFT_REALWIDTH  320
+#else
 #ifdef OVERRULE_WIDTH
 #define TFT_WIDTH      OVERRULE_WIDTH
 #else 
@@ -36,12 +40,18 @@
 #endif
 #define TFT_REALWIDTH  320
 #endif
+#endif
+#ifdef ILI9488
+#define TFT_HEIGHT     240
+#define TFT_REALHEIGHT 320
+#else
 #ifdef OVERRULE_HEIGHT
 #define TFT_HEIGHT     OVERRULE_HEIGHT
 #else 
 #define TFT_HEIGHT     240
 #endif
 #define TFT_REALHEIGHT 240
+#endif
 
 #define AUDIO_SAMPLE_BUFFER_SIZE 256
 #define DEFAULT_VSYNC_PIN 8
@@ -53,7 +63,8 @@ typedef enum gfx_mode_t
 {
   MODE_UNDEFINED   = 0,
   MODE_TFT_320x240 = 1,
-  MODE_VGA_320x240 = 2
+  MODE_TFT_320x320 = 2,
+  MODE_VGA_320x240 = 3
 } gfx_mode_t;
 
 typedef enum vga_error_t

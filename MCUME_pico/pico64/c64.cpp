@@ -37,7 +37,7 @@ static void oneRasterLine(void) {
     } else {
       vic_do_simple();
     }
-
+    
     if (--lc == 0) {
       lc = LINEFREQ / 10; // 10Hz
       cia1_checkRTCAlarm();
@@ -121,10 +121,10 @@ struct {
   union {
     uint32_t kv;
     struct {
-      uint8_t ke,   //Extratasten SHIFT, STRG, ALT...
+      uint8_t ke,   // Modifier Keys - SHIFT, CTRL, ALT... 
               kdummy,
-              k,    //Erste gedrückte Taste
-              k2;   //Zweite gedrückte Taste
+              k,    // First pressed key
+              k2;   // Second pressed key
     };
   };
   uint32_t lastkv;
@@ -135,14 +135,14 @@ struct {
 
 
 static void setKey(uint32_t k, bool pressed) {
-  if (pressed) {
-    kbdData.kv = (k << 16);
-    kbdData.ke = kbdData.k2;
-    kbdData.k2 = 0;
+  if (pressed) {                    // If the key is pressed
+    kbdData.kv = (k << 16);         // Store the key in the high word (upper 16-bits)
+    kbdData.ke = kbdData.k2;        // Set the 2nd key pressed as a modifier key
+    kbdData.k2 = 0;                 // Clear the 2nd key pressed (k2) 
   }
-  else
+  else                              // If the key is released
   {
-    kbdData.kv = 0;       
+    kbdData.kv = 0;                 // Clear the key value (kv) 
   }
 }
 
@@ -287,7 +287,7 @@ void c64_Start(char * filename)
 }
 
 
-static uint8_t nbkeys = 0;
+static uint8_t nbkeys = 0;  // Number of keys to process
 static uint8_t kcnt = 0;
 static bool toggle = true;
 
@@ -343,6 +343,23 @@ static const char * digits = "0123456789ABCDEF";
 static char buf[5] = {0,0,0,0,0};
 #endif
 
+void picoCalc_Input(int btn) {
+    static bool alreadyProcessed = false;
+    if ( (btn != 0) && (alreadyProcessed == false) ) { 
+      setKey(ascii2scan[btn],true);                 // Get the ASCII code and set the key as pressed
+        alreadyProcessed = true;                                  // We've now registered a key press
+    }
+    else if (btn == 0){                          // No key is pressed
+      setKey(ascii2scan[btn],false);                // Release the key
+      alreadyProcessed = false;                                 // Reset the key press registered flag
+    }         
+}
+
+/* Handle input from the keyboard:
+  1. If there are keys to process in the text sequence, process them one at a time
+  2. If there are no keys to process, check if USER1 is pressed to start the LOAD sequence
+  3. If load sequence isn't being run, read the keyboard
+*/
 void c64_Input(int bClick) {
 #ifdef DEBUG
         /*
@@ -397,7 +414,8 @@ void c64_Input(int bClick) {
   }
 */  
 #endif
-  if (nbkeys == 0) {
+  if (nbkeys == 0) {            // If there are no keys to auto-process
+
 #ifndef PICOMPUTER
 /*    
     if (bClick & MASK_KEY_USER2) {
@@ -413,26 +431,26 @@ void c64_Input(int bClick) {
     else
 */    
 #endif
-    if (loadtimeout > 0) {
+    if (loadtimeout > 0) {      // Wait for a time period before loading the LOAD sequence
       loadtimeout--; 
     }
-    if ( (bClick & MASK_KEY_USER1) && !(emu_GetPad() & MASK_OSKB) ) {
-      if (loadtimeout == 0) {
-        if (firsttime) {
-          firsttime = false;
-          textseq = textload;
-          nbkeys = strlen(textseq);   
-          kcnt=0;
+    if ( (bClick & MASK_KEY_USER1) && !(emu_GetPad() & MASK_OSKB) ) {     // Only run the load sequence if USER1 is pressed (and OSKB not active)
+      if (loadtimeout == 0) {                                             // Make sure we've waited for the load timeout
+        if (firsttime) {                                                  // Only do this the first time USER1 is pressed
+          firsttime = false;                                              // We've now loaded it once, so don't do it again
+          textseq = textload;                                             // Set the text sequence to the LOAD sequence
+          nbkeys = strlen(textseq);                                       // Number of keys to process
+          kcnt=0;                                                         // Reset key counter
         }
-        else {
-          cpu.swapJoysticks = !cpu.swapJoysticks;
+        else {                                                            // If USER1 is pressed again, just swap the joysticks
+          cpu.swapJoysticks = !cpu.swapJoysticks;                         // Swap joysticks when USER1 is
         }        
       }
     } 
-    else  
+    else                                       // If USER1 isn't pressed, read the keyboard
     {
-      int hk = emu_ReadI2CKeyboard();
-      if ( (hk != 0) && (res == false) ) {
+      int hk = emu_ReadI2CKeyboard();             // Read the I2C keyboard
+      if ( (hk != 0) && (res == false) ) {        // If a key is pressed and we haven't already registered a key press
 #ifdef DEBUG        
         buf[3] = 0;
         buf[0] = digits[(hk>>8)&0xf];
@@ -440,25 +458,25 @@ void c64_Input(int bClick) {
         buf[2] = digits[hk&0xf];        
         tft.drawText(0,0,buf,RGBVAL16(0x00,0x00,0x00),RGBVAL16(0xFF,0xFF,0xFF),true);
 #endif
-        setKey(ascii2scan[hk],true);
-        res = true;
+        setKey(ascii2scan[hk],true);                 // Get the ASCII code and set the key as pressed
+        res = true;                                  // We've now registered a key press
       } 
-      else if (hk == 0){
-        setKey(ascii2scan[hk],false);
-        res = false;
+      else if (hk == 0){                          // No key is pressed
+        setKey(ascii2scan[hk],false);                // Release the key
+        res = false;                                 // Reset the key press registered flag
       }        
     }
   }
-  else {
-    char k = textseq[kcnt];
-    if (k != '\t') setKey(ascii2scan[k],toggle);
-    if (!toggle) {
-      kcnt++;
-      nbkeys--;
-      toggle = true;
+  else {                                            // If there are keys to autoprocess, this will automatically process them      
+    char k = textseq[kcnt];                            // Get the next key to process 
+    if (k != '\t') setKey(ascii2scan[k],toggle);       // Set or clear the key (if not a tab)
+    if (!toggle) {                                     // If we just cleared a key
+      kcnt++;                                             // Move to the next key
+      nbkeys--;                                           // Decrement # of keys to process
+      toggle = true;                                      // Next time we will set the key
     }
-    else {
-      toggle = false; 
+    else {                                             // If we just set a key
+      toggle = false;                                     // Next time we will clear the key
     }
   }
 }

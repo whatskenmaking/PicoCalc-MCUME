@@ -96,8 +96,10 @@ bool my_spi_init(spi_t *this) {
     // byte at *ptr. The byte is set to some implementation defined nonzero
     // “set” value and the return value is true if and only if the previous
     // contents were “set”.
-    if (__atomic_test_and_set(&(this->initialized), __ATOMIC_SEQ_CST))
-        return true;
+    //if (__atomic_test_and_set(&(this->initialized), __ATOMIC_SEQ_CST))
+    //    return true;
+    if (this->initialized) return true;
+    this->initialized = true;
 
     // The SPI may be shared (using multiple SSs); protect it
     sem_init(&this->sem, 0, 1); 

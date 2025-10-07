@@ -1,3 +1,19 @@
+# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.2.0)
+set(toolchainVersion 14_2_Rel1)
+set(picotoolVersion 2.2.0)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
+set(PICO_BOARD pico CACHE STRING "Board type")
+
 cmake_minimum_required(VERSION 3.12)
 
 # Pull in PICO SDK (must be before project)
@@ -6,9 +22,9 @@ include(pico_sdk_import.cmake)
 # We also need PICO EXTRAS
 #include(pico_extras_import.cmake)
 
-set(TARGET testkeymax)
+#set(TARGET testkeymax)
 #set(TARGET pico20)
-#set(TARGET pico64)
+set(TARGET pico64)
 #set(TARGET pico81)
 #set(TARGET picospeccy)
 #set(TARGET pico800)
@@ -30,6 +46,8 @@ add_subdirectory(FatFs_SPI build)
 include_directories(${TARGET})
 include_directories(config)
 include_directories(display)
+include_directories(display/lcdspi)
+include_directories(i2ckbd)
 #include_directories(vga_t4)
 #include_directories(picovga_t4)
 #include_directories(tft_t)
@@ -256,12 +274,18 @@ set(TESTKEYMAX_SOURCES
 	)
 endif()
 
+# PICOCALC system - just needs the i2ckbd library
+set(PICOCALC_SOURCES 
+		i2ckbd/i2ckbd.c
+	)
+
 set(DISPLAY_SOURCES 
 		display/pico_dsp.cpp
 		display/vga.cpp
 		display/vga_vmode.cpp
 		display/emuapi.cpp
-		display/AudioPlaySystem.cpp		
+		display/AudioPlaySystem.cpp
+		display/lcdspi/lcdspi.c		
 	)
 
 #if( ${TARGET} MATCHES "gfxengine" )
@@ -349,6 +373,7 @@ add_executable(${TARGET}
 		${TESTIO_SOURCES}
 		${TESTVGA_SOURCES}
 		${TESTKEYMAX_SOURCES}
+		${PICOCALC_SOURCES}
 #		${GFXENGINE_SOURCES}
 #		${PICOSND_SOURCES}
 #		${TESTPSRAM_SOURCES}
@@ -370,12 +395,13 @@ target_link_libraries(${TARGET} pico_multicore
 	    FatFs_SPI
 #	    pico_scanvideo_dpi
 	    hardware_adc
+	    hardware_i2c
 	    hardware_pio
-        hardware_pwm	    
+        hardware_pwm
 	)
 
 
-#target_compile_options(${TARGET} PUBLIC -O3)
+target_compile_options(${TARGET} PUBLIC -O2)
 #target_compile_options(${TARGET} PUBLIC -Wall -Wextra -Wno-unused-function -Wno-unused-parameter)
 IF (NOT DEFINED N_SD_CARDS)
     SET(N_SD_CARDS 1)
@@ -383,7 +409,7 @@ ENDIF()
 target_compile_definitions(${TARGET} PUBLIC N_SD_CARDS=${N_SD_CARDS})
 
 
-#pico_enable_stdio_uart(${TARGET} 0)
-#pico_enable_stdio_usb(${TARGET} 0)
+#pico_enable_stdio_uart(${TARGET} 1)
+pico_enable_stdio_usb(${TARGET} 1)
 
 pico_add_extra_outputs(${TARGET})

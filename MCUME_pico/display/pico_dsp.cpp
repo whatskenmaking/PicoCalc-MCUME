@@ -21,12 +21,21 @@
 #include "font8x8.h"
 #include "include.h"
 
+#include "lcdspi.h"
+
+extern PICO_DSP tft;
+#define RGBVAL16(r,g,b)  ( (((r>>3)&0x1f)<<11) | (((g>>2)&0x3f)<<5) | (((b>>3)&0x1f)<<0) )
+
 static gfx_mode_t gfxmode = MODE_UNDEFINED;
 
 /* TFT structures / constants */
 #define digitalWrite(pin, val) gpio_put(pin, val)
 
-#define SPICLOCK 60000000 
+// Default SPI clock for TFT panel. ILI9488 panels typically tolerate 62.5MHz+ on short wires.
+// You can lower this if you see artifacts.
+#ifndef SPICLOCK
+#define SPICLOCK 62500000
+#endif
 #ifdef USE_VGA
 #define SPI_MODE SPI_CPOL_1 
 #else
@@ -38,6 +47,9 @@ static gfx_mode_t gfxmode = MODE_UNDEFINED;
 #endif
 #endif
 #ifdef ILI9341
+#define SPI_MODE SPI_CPOL_0
+#endif
+#ifdef ILI9488
 #define SPI_MODE SPI_CPOL_0
 #endif
 #endif
@@ -77,7 +89,11 @@ static void SPItransfer16(uint16_t val)
   spi_write_blocking(TFT_SPIREG, dat8, 2);
 }
 
+// All configurations now use 16-bit RGB565 pixel transfers
+#define SPItransferPixel(color) SPItransfer16(color)
+
 #define DELAY_MASK     0x80
+
 static const uint8_t init_commands[] = { 
   1+DELAY_MASK, TFT_SWRESET,  150,
   1+DELAY_MASK, TFT_SLPOUT,   255,
@@ -89,7 +105,7 @@ static const uint8_t init_commands[] = {
 };
 
 /* TFT structures / constants */
-#define RGBVAL16(r,g,b)  ( (((r>>3)&0x1f)<<11) | (((g>>2)&0x3f)<<5) | (((b>>3)&0x1f)<<0) )
+#define RGBVAL(r,g,b) RGBVAL16(r,g,b)
 
 static uint16_t * blocks[NR_OF_BLOCK];
 static uint16_t blocklens[NR_OF_BLOCK];
@@ -99,6 +115,69 @@ static volatile uint8_t rstop = 0;
 static volatile bool cancelled = false;
 static volatile uint8_t curTransfer = 0;
 static uint8_t nbTransfer = 0;
+
+// Scanline buffer for direct 16-bit RGB565 pushes (2 bytes per pixel)
+static uint8_t picocalc_linebuf[320*2];
+
+#ifdef PICOCALC
+// Per-line DMA for PICOCALC - ping-pong buffers for overlapped line processing
+static int picocalc_dma_ch = -1;
+static volatile bool picocalc_dma_busy = false;
+static uint8_t picocalc_line_buf[2][320*2]; // ping-pong buffers
+static int picocalc_active_buf = 0; // which buffer is being filled (0 or 1)
+
+static void picocalc_dma_isr() {
+  uint32_t mask = 1u << picocalc_dma_ch;
+  if (dma_hw->ints0 & mask) {
+    dma_hw->ints0 = mask; // clear interrupt
+    picocalc_dma_busy = false;
+  }
+}
+
+static void picocalc_dma_init() {
+  if (picocalc_dma_ch >= 0) return; // already initialized
+  
+  picocalc_dma_ch = dma_claim_unused_channel(true);
+  dma_channel_config cfg = dma_channel_get_default_config(picocalc_dma_ch);
+  channel_config_set_transfer_data_size(&cfg, DMA_SIZE_8);
+  channel_config_set_dreq(&cfg, TFT_SPIDREQ);
+  channel_config_set_read_increment(&cfg, true);
+  channel_config_set_write_increment(&cfg, false);
+  
+  dma_channel_configure(picocalc_dma_ch, &cfg,
+                        &spi_get_hw(TFT_SPIREG)->dr, // SPI data register
+                        NULL, 0, false); // read_addr and count set per transfer
+  
+  // Set up interrupt handler
+  irq_set_exclusive_handler(DMA_IRQ_0, picocalc_dma_isr);
+  dma_channel_set_irq0_enabled(picocalc_dma_ch, true);
+  irq_set_enabled(DMA_IRQ_0, true);
+}
+
+// Non-blocking DMA transfer for a single scanline
+static void picocalc_dma_send_line(const uint8_t *data, uint32_t byte_count) {
+  picocalc_dma_busy = true;
+  dma_channel_transfer_from_buffer_now(picocalc_dma_ch, data, byte_count);
+}
+
+// Blocking wait for current DMA transfer to complete
+static void picocalc_dma_wait() {
+  while (picocalc_dma_busy) {
+    tight_loop_contents();
+  }
+}
+
+// Get buffer for current line prep (ping-pong)
+static uint8_t* picocalc_get_line_buffer() {
+  return picocalc_line_buf[picocalc_active_buf];
+}
+
+// Send current buffer via DMA and switch to next buffer
+static void picocalc_send_and_swap(uint32_t byte_count) {
+  picocalc_dma_send_line(picocalc_line_buf[picocalc_active_buf], byte_count);
+  picocalc_active_buf = 1 - picocalc_active_buf; // swap 0<->1
+}
+#endif // PICOCALC
 
 /* VGA structures / constants */
 #define R16(rgb) ((rgb>>8)&0xf8) 
@@ -214,7 +293,7 @@ gfx_error_t PICO_DSP::begin(gfx_mode_t mode)
     case MODE_VGA_320x240:
       // Reset SPI if we come from TFT mode
       if (gfxmode == MODE_TFT_320x240) {
-        fillScreenNoDma(RGBVAL16(0x0,0x00,0x00));
+        fillScreenNoDma(RGBVAL(0x0,0x00,0x00));
         digitalWrite(_cs, 0);
         digitalWrite(_dc, 0);
         SPItransfer(TFT_DISPOFF);
@@ -257,6 +336,13 @@ gfx_error_t PICO_DSP::begin(gfx_mode_t mode)
       fb_width = TFT_WIDTH;
       fb_height = TFT_HEIGHT;      
       fb_stride = fb_width;    
+      
+#ifdef PICOCALC
+      // Use working LCD driver for PICOCALC
+      lcd_init();
+      return GFX_OK;
+#endif
+      
       _cs   = TFT_CS;
       _dc   = TFT_DC;
       _rst  = TFT_RST;
@@ -275,7 +361,7 @@ gfx_error_t PICO_DSP::begin(gfx_mode_t mode)
         digitalWrite(_bkl, 1);
       } 
 
-      spi_init(TFT_SPIREG, SPICLOCK);
+  spi_init(TFT_SPIREG, SPICLOCK);
       spi_set_format(TFT_SPIREG, 8, SPI_MODE, SPI_CPHA_0, SPI_MSB_FIRST);
       gpio_set_function(_sclk , GPIO_FUNC_SPI);
       gpio_set_function(_mosi , GPIO_FUNC_SPI);
@@ -358,6 +444,9 @@ void PICO_DSP::flipscreen(bool flip)
 #ifdef ILI9341         
     SPItransfer(TFT_MADCTL_MV | TFT_MADCTL_BGR);
 #endif
+#ifdef ILI9488P
+    SPItransfer(TFT_MADCTL_MV | TFT_MADCTL_BGR);
+#endif
 #ifdef ST7789
 #ifdef ROTATE_SCREEN
     SPItransfer(TFT_MADCTL_RGB);
@@ -436,6 +525,10 @@ static void setDmaStruct() {
 }
 
 void PICO_DSP::startRefresh(void) {
+#ifdef PICOCALC
+  // PICOCALC uses direct scanline pushes; skip DMA refresh setup
+    return;
+#endif
   if (gfxmode == MODE_TFT_320x240) {
     uint32_t remaining = TFT_HEIGHT*TFT_WIDTH*2;
     int i=0;
@@ -460,7 +553,7 @@ void PICO_DSP::startRefresh(void) {
       blocks[i] = fb;
       blocklens[i] = len/2;
       if (blocks[i] == 0) {
-        fillScreenNoDma(RGBVAL16(0xFF,0xFF,0x00));
+        fillScreenNoDma(RGBVAL(0xFF,0xFF,0x00));
         printf("FB allocaltion failed for block %d\n",i);
         sleep_ms(10000);    
       }
@@ -472,7 +565,7 @@ void PICO_DSP::startRefresh(void) {
     rstop = 0;     
     digitalWrite(_cs, 1);
     setDmaStruct();
-    fillScreen(RGBVAL16(0x00,0x00,0x00));
+    fillScreen(RGBVAL(0x00,0x00,0x00));
     digitalWrite(_cs, 0);
 
     setArea((TFT_REALWIDTH-TFT_WIDTH)/2, (TFT_REALHEIGHT-TFT_HEIGHT)/2, (TFT_REALWIDTH-TFT_WIDTH)/2 + TFT_WIDTH-1, (TFT_REALHEIGHT-TFT_HEIGHT)/2+TFT_HEIGHT-1);  
@@ -481,7 +574,7 @@ void PICO_DSP::startRefresh(void) {
     dma_start_channel_mask(1u << dma_tx);    
   }
   else { 
-    fillScreen(RGBVAL16(0x00,0x00,0x00));   
+    fillScreen(RGBVAL(0x00,0x00,0x00));   
   }
 }
 
@@ -499,7 +592,7 @@ void PICO_DSP::stopRefresh(void) {
     sleep_ms(100);
     cancelled = false;  
     //dmatx.detachInterrupt();
-    fillScreen(RGBVAL16(0x00,0x00,0x00));
+    fillScreen(RGBVAL(0x00,0x00,0x00));
     digitalWrite(_cs, 1);
     // we switch back to GFX mode!!
     begin(gfxmode);
@@ -823,6 +916,31 @@ void PICO_DSP::drawSprite(int16_t x, int16_t y, const dsp_pixel *bitmap) {
 }
 
 void PICO_DSP::writeLine(int width, int height, int y, dsp_pixel *buf) {
+#ifdef PICOCALC
+  if (gfxmode == MODE_TFT_320x240) {
+    int drawWidth = width > 320 ? 320 : width;
+    int xOffset = 0; // Assume full width; adjust if you want centering
+    int panelYOffset = 0;
+#ifdef ILI9488
+    if (LCD_HEIGHT > fb_height) panelYOffset = (LCD_HEIGHT - fb_height) / 2; // vertical centering (e.g. 40)
+#endif
+    int physY = y + panelYOffset;
+
+    // Fallback to original per-line approach to restore functionality
+    for (int i = 0; i < drawWidth; i++) {
+      uint16_t val = *buf++; // RGB565
+      int idx = i * 2;
+      picocalc_linebuf[idx]     = val >> 8;      // high byte
+      picocalc_linebuf[idx + 1] = val & 0xFF;    // low byte
+    }
+    // Send one scanline window
+    define_region_spi(xOffset, physY, xOffset + drawWidth - 1, physY, 1);
+    hw_send_spi(picocalc_linebuf, drawWidth * 2);
+    lcd_spi_raise_cs();
+
+    return; // done for PICOCALC path
+  }
+#endif
   if (gfxmode == MODE_TFT_320x240) {
     uint16_t * block=blocks[y>>6];
     uint16_t * dst=&block[(y&0x3F)*fb_stride];
@@ -839,7 +957,7 @@ void PICO_DSP::writeLine(int width, int height, int y, dsp_pixel *buf) {
           val  = ((uint32_t)*buf++ + val)/2;
 #else
           uint16_t val2 = *buf++;
-          val = RGBVAL16((R16(val)+R16(val2))/2,(G16(val)+G16(val2))/2,(B16(val)+B16(val2))/2);
+          val = RGBVAL((R16(val)+R16(val2))/2,(G16(val)+G16(val2))/2,(B16(val)+B16(val2))/2);
  #endif        
           pos = delta;
         }
@@ -910,6 +1028,66 @@ void PICO_DSP::writeLine(int width, int height, int y, dsp_pixel *buf) {
 }
 
 void PICO_DSP::writeLinePal(int width, int height, int y, uint8_t *buf, dsp_pixel *palette) {
+#ifdef PICOCALC
+  if (gfxmode == MODE_TFT_320x240) {
+    // Initialize DMA on first use
+    static bool dma_initialized = false;
+    if (!dma_initialized) {
+      picocalc_dma_init();
+      dma_initialized = true;
+    }
+    
+    // Vertically center if needed within the emulated framebuffer height
+    if ((height < fb_height) && (height > 2)) y += (fb_height - height) / 2;
+    if (y < 0 || y >= fb_height) return;
+    int drawWidth = width;
+    if (drawWidth > fb_width) drawWidth = fb_width; // simple clip; could scale but not required for C64 (320)
+    // Horizontal centering if source narrower than target
+    int xOffset = 0;
+    if (drawWidth < fb_width) xOffset = (fb_width - drawWidth)/2;
+    // Center within physical 320x320 panel if height is 240 (add vertical margin)
+#ifdef ILI9488
+    int panelYOffset = 0;
+    if (TFT_HEIGHT == 240) {
+      panelYOffset = (LCD_HEIGHT - TFT_HEIGHT) / 2; // typically 40
+    } else if (LCD_HEIGHT > fb_height) {
+      panelYOffset = (LCD_HEIGHT - fb_height)/2;
+    }
+    int physY = y + panelYOffset;
+#else
+    int physY = y;
+#endif
+    
+    // Get current line buffer for data preparation
+    uint8_t* line_buffer = picocalc_get_line_buffer();
+    
+    // Convert palette indices to RGB565 (can overlap with previous DMA)
+    for (int i = 0; i < drawWidth; i++) {
+      uint16_t val = palette[buf[i]]; // RGB565
+      int idx = i * 2;
+      line_buffer[idx]     = val >> 8;
+      line_buffer[idx + 1] = val & 0xFF;
+    }
+    
+    // Wait for any previous DMA transfer to complete before setting up new window
+    picocalc_dma_wait();
+    
+    // Set up window for this line
+    define_region_spi(xOffset, physY, xOffset + drawWidth - 1, physY, 1);
+    
+    // Start DMA transfer and swap to next buffer (allows overlap with next line prep)
+    picocalc_send_and_swap(drawWidth * 2);
+    
+    // Only wait for completion on the last line of the frame
+    // For middle lines, the next line will wait, providing better overlap
+    if (y >= height - 1) {
+      picocalc_dma_wait();
+    }
+    lcd_spi_raise_cs();
+    
+    return;
+  }
+#endif
   if (gfxmode == MODE_TFT_320x240) {
     if ( (height<fb_height) && (height > 2) ) y += (fb_height-height)/2;
     uint16_t * block=blocks[y>>6];
@@ -927,7 +1105,7 @@ void PICO_DSP::writeLinePal(int width, int height, int y, uint8_t *buf, dsp_pixe
           val  = ((uint32_t)palette[*buf++] + val)/2;
 #else
           uint16_t val2 = *buf++;
-          val = RGBVAL16((R16(val)+R16(val2))/2,(G16(val)+G16(val2))/2,(B16(val)+B16(val2))/2);
+          val = RGBVAL((R16(val)+R16(val2))/2,(G16(val)+G16(val2))/2,(B16(val)+B16(val2))/2);
 #endif        
           pos = delta;
         }
@@ -1076,6 +1254,22 @@ void PICO_DSP::writeScreenPal(int width, int height, int stride, uint8_t *buf, d
  ***********************************************************************************************/
 void PICO_DSP::fillScreenNoDma(dsp_pixel color) {
   if (gfxmode == MODE_TFT_320x240) {
+#ifdef PICOCALC
+    // Use working LCD driver for PICOCALC  
+    // Convert 16-bit color to 24-bit RGB for working driver
+    int r = (color >> 11) & 0x1F;
+    int g = (color >> 5) & 0x3F; 
+    int b = color & 0x1F;
+    // Scale to full 8-bit range
+    r = (r * 255) / 31;
+    g = (g * 255) / 63;
+    b = (b * 255) / 31;
+    int rgb24 = RGB(r, g, b);
+    
+    draw_rect_spi(0, 0, LCD_WIDTH-1, LCD_HEIGHT-1, rgb24);
+    return;
+#endif
+    
     digitalWrite(_cs, 0);
     setArea(0, 0, TFT_REALWIDTH-1, TFT_REALHEIGHT-1);  
     int i,j;
@@ -1083,7 +1277,7 @@ void PICO_DSP::fillScreenNoDma(dsp_pixel color) {
     {
       for (i=0; i<TFT_REALWIDTH; i++) {
         //digitalWrite(_dc, 1);
-        SPItransfer16(color);     
+        SPItransferPixel(color);     
       }
     }
 #ifdef ILI9341  
@@ -1106,7 +1300,7 @@ void PICO_DSP::drawRectNoDma(int16_t x, int16_t y, int16_t w, int16_t h, dsp_pix
     int i;
     for (i=0; i<(w*h); i++)
     {
-      SPItransfer16(color);
+      SPItransferPixel(color);
     }
 #ifdef ILI9341  
     digitalWrite(_dc, 0);
@@ -1173,7 +1367,7 @@ void PICO_DSP::drawSpriteNoDma(int16_t x, int16_t y, const dsp_pixel *bitmap, ui
       bmp_ptr = (uint16_t*)bitmap;
       for (int col=0;col<arw; col++)
       {
-          SPItransfer16(*bmp_ptr++);             
+          SPItransferPixel(*bmp_ptr++);             
       } 
       bitmap +=  w;
     }
@@ -1192,6 +1386,32 @@ void PICO_DSP::drawSpriteNoDma(int16_t x, int16_t y, const dsp_pixel *bitmap, ui
 
 void PICO_DSP::drawTextNoDma(int16_t x, int16_t y, const char * text, dsp_pixel fgcolor, dsp_pixel bgcolor, bool doublesize) {
   if (gfxmode == MODE_TFT_320x240) {
+#ifdef PICOCALC
+    // Use working LCD driver's native text functions
+    // Convert colors from 16-bit to 24-bit RGB
+    int fg_r = (fgcolor >> 11) & 0x1F;
+    int fg_g = (fgcolor >> 5) & 0x3F; 
+    int fg_b = fgcolor & 0x1F;
+    fg_r = (fg_r * 255) / 31;
+    fg_g = (fg_g * 255) / 63;
+    fg_b = (fg_b * 255) / 31;
+    int fg_rgb24 = RGB(fg_r, fg_g, fg_b);
+    
+    int bg_r = (bgcolor >> 11) & 0x1F;
+    int bg_g = (bgcolor >> 5) & 0x3F; 
+    int bg_b = bgcolor & 0x1F;
+    bg_r = (bg_r * 255) / 31;
+    bg_g = (bg_g * 255) / 63;
+    bg_b = (bg_b * 255) / 31;
+    int bg_rgb24 = RGB(bg_r, bg_g, bg_b);
+    
+    // Set cursor position and colors, then print the string
+    lcd_set_cursor(x, y);
+    lcd_set_text_colors(fg_rgb24, bg_rgb24);
+    lcd_print_string((char*)text);
+    return;
+#endif
+    
     uint16_t c;
     while ((c = *text++)) {
       const unsigned char * charpt=&font8x8[c][0];
@@ -1202,54 +1422,54 @@ void PICO_DSP::drawTextNoDma(int16_t x, int16_t y, const char * text, dsp_pixel 
         unsigned char bits;
         if (doublesize) {
           bits = *charpt;     
-          if (bits&0x01) SPItransfer16(fgcolor);
-          else SPItransfer16(bgcolor);
+          if (bits&0x01) SPItransferPixel(fgcolor);
+          else SPItransferPixel(bgcolor);
           bits = bits >> 1;     
-          if (bits&0x01) SPItransfer16(fgcolor);
-          else SPItransfer16(bgcolor);
+          if (bits&0x01) SPItransferPixel(fgcolor);
+          else SPItransferPixel(bgcolor);
           bits = bits >> 1;     
-          if (bits&0x01) SPItransfer16(fgcolor);
-          else SPItransfer16(bgcolor);
+          if (bits&0x01) SPItransferPixel(fgcolor);
+          else SPItransferPixel(bgcolor);
           bits = bits >> 1;     
-          if (bits&0x01) SPItransfer16(fgcolor);
-          else SPItransfer16(bgcolor);
+          if (bits&0x01) SPItransferPixel(fgcolor);
+          else SPItransferPixel(bgcolor);
           bits = bits >> 1;     
-          if (bits&0x01) SPItransfer16(fgcolor);
-          else SPItransfer16(bgcolor);
+          if (bits&0x01) SPItransferPixel(fgcolor);
+          else SPItransferPixel(bgcolor);
           bits = bits >> 1;     
-          if (bits&0x01) SPItransfer16(fgcolor);
-          else SPItransfer16(bgcolor);
+          if (bits&0x01) SPItransferPixel(fgcolor);
+          else SPItransferPixel(bgcolor);
           bits = bits >> 1;     
-          if (bits&0x01) SPItransfer16(fgcolor);
-          else SPItransfer16(bgcolor);
+          if (bits&0x01) SPItransferPixel(fgcolor);
+          else SPItransferPixel(bgcolor);
           bits = bits >> 1;     
-          if (bits&0x01) SPItransfer16(fgcolor);
-          else SPItransfer16(bgcolor);       
+          if (bits&0x01) SPItransferPixel(fgcolor);
+          else SPItransferPixel(bgcolor);       
         }
         bits = *charpt++;     
-        if (bits&0x01) SPItransfer16(fgcolor);
-        else SPItransfer16(bgcolor);
+        if (bits&0x01) SPItransferPixel(fgcolor);
+        else SPItransferPixel(bgcolor);
         bits = bits >> 1;     
-        if (bits&0x01) SPItransfer16(fgcolor);
-        else SPItransfer16(bgcolor);
+        if (bits&0x01) SPItransferPixel(fgcolor);
+        else SPItransferPixel(bgcolor);
         bits = bits >> 1;     
-        if (bits&0x01) SPItransfer16(fgcolor);
-        else SPItransfer16(bgcolor);
+        if (bits&0x01) SPItransferPixel(fgcolor);
+        else SPItransferPixel(bgcolor);
         bits = bits >> 1;     
-        if (bits&0x01) SPItransfer16(fgcolor);
-        else SPItransfer16(bgcolor);
+        if (bits&0x01) SPItransferPixel(fgcolor);
+        else SPItransferPixel(bgcolor);
         bits = bits >> 1;     
-        if (bits&0x01) SPItransfer16(fgcolor);
-        else SPItransfer16(bgcolor);
+        if (bits&0x01) SPItransferPixel(fgcolor);
+        else SPItransferPixel(bgcolor);
         bits = bits >> 1;     
-        if (bits&0x01) SPItransfer16(fgcolor);
-        else SPItransfer16(bgcolor);
+        if (bits&0x01) SPItransferPixel(fgcolor);
+        else SPItransferPixel(bgcolor);
         bits = bits >> 1;     
-        if (bits&0x01) SPItransfer16(fgcolor);
-        else SPItransfer16(bgcolor);
+        if (bits&0x01) SPItransferPixel(fgcolor);
+        else SPItransferPixel(bgcolor);
         bits = bits >> 1;     
-        if (bits&0x01) SPItransfer16(fgcolor);
-        else SPItransfer16(bgcolor);
+        if (bits&0x01) SPItransferPixel(fgcolor);
+        else SPItransferPixel(bgcolor);
       }
       x +=8;
 #ifdef ILI9341  

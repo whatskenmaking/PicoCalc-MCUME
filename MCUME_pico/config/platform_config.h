@@ -6,12 +6,22 @@
 // PICOMPUTER has support for TFT+keymatrix+Sound 
 
 
-#define PICOZX         1
+#define PICOCALC       1
+//#define PICOZX         1
 //#define PICOMPUTER     1
 //#define PICOMPUTERMAX  1
 //#define PICORETROVGA   1
 //#define MCUME_REV1      1
 //#define MCUME_REV2      1
+
+#ifdef PICOCALC
+#define ILI9488        1 
+#define HAS_SND        0
+// Add your custom PICOCALC configuration here
+// Examples:
+// #define CUSTOM_RESOLUTION 1
+// #define CALCULATOR_MODE 1
+#endif
 
 #ifdef PICOZX
 //#define USE_VGA        1
